@@ -70,6 +70,10 @@ class QParam(nn.Module):
                 self.min.data = tensor.min().data
             self.min.clamp_(max=0)
 
+            if self.min == self.max:
+                self.min = self.min - 10e-6
+                self.max = self.max + 10e-6
+
             self.scale, self.zero_point = calcScaleZeroPoint(self.min, self.max, self.num_bits)
             self.is_initialized = True
 
@@ -136,11 +140,14 @@ class QLinear(QModule):
         if qo is not None:
             self.qo = qo
 
-        self.fc_module.weight.data = self.qw.quantize_tensor(self.fc_module.weight.data)
-        self.fc_module.weight.data = self.fc_module.weight.data - self.qw.zero_point
-        self.fc_module.bias.data = quantize_tensor(
-            self.fc_module.bias.data, scale=self.qi.scale * self.qw.scale, zero_point=0, num_bits=32, signed=True
-        )
+        weight = self.fc_module.weight.data
+        if self.fc_module.bias:
+            bias = self.fc_module.bias.data
+
+        self.fc_module.weight.data = self.qw.quantize_tensor(weight) - self.qw.zero_point
+        if self.fc_module.bias:
+            self.fc_module.bias.data = quantize_tensor(bias, scale=self.qi.scale * self.qw.scale, zero_point=0, num_bits=32, signed=True)
+        pass
 
     def forward(self, x):
         if hasattr(self, "qi"):
@@ -148,9 +155,10 @@ class QLinear(QModule):
             x = FakeQuantize.apply(x, self.qi)
 
         self.qw.update(self.fc_module.weight.data)
-        w_q = FakeQuantize.apply(self.fc_module.weight, self.qw)
+        weight_q = FakeQuantize.apply(self.fc_module.weight, self.qw)
+        bias_q = FakeQuantize.apply(self.fc_module.bias, self.qw) if self.fc_module.bias else None
 
-        x = F.linear(x, w_q, self.fc_module.bias)
+        x = F.linear(x, weight_q, bias_q)
 
         if hasattr(self, "qo"):
             self.qo.update(x)
@@ -191,12 +199,8 @@ class QConv2d(QModule):
         if qo is not None:
             self.qo = qo
 
-        self.conv_module.weight.data = self.qw.quantize_tensor(self.conv_module.weight.data)
-        self.conv_module.weight.data = (self.conv_module.weight.data - self.qw.zero_point).round()
-
-        self.conv_module.bias.data = quantize_tensor(
-            self.conv_module.bias.data, scale=self.qi.scale * self.qw.scale, zero_point=0, num_bits=32, signed=True
-        )
+        self.conv_module.weight.data = (self.qw.quantize_tensor(self.conv_module.weight.data) - self.qw.zero_point).round()
+        self.conv_module.bias.data = quantize_tensor(self.conv_module.bias.data, scale=self.qi.scale * self.qw.scale, zero_point=0, num_bits=32, signed=True)
 
     def forward(self, x):
         if hasattr(self, "qi"):
@@ -204,12 +208,13 @@ class QConv2d(QModule):
             x = FakeQuantize.apply(x, self.qi)
 
         self.qw.update(self.conv_module.weight.data)
-
+        weight_q = FakeQuantize.apply(self.conv_module.weight, self.qw)
+        bias_q = FakeQuantize.apply(self.conv_module.bias, self.qw)
 
         x = F.conv2d(
             x,
-            FakeQuantize.apply(self.conv_module.weight, self.qw),
-            self.conv_module.bias,
+            weight_q,
+            bias_q,
             stride=self.conv_module.stride,
             padding=self.conv_module.padding,
             dilation=self.conv_module.dilation,
@@ -336,8 +341,8 @@ class QConvBNReLU(QModule):
                 dilation=self.conv_module.dilation,
                 groups=self.conv_module.groups,
             )
-            y = y.permute(1, 0, 2, 3)  # NCHW -> CNHW
-            y = y.contiguous().view(self.conv_module.out_channels, -1)  # CNHW -> C,NHW
+            y = y.contiguous().permute(1, 0, 2, 3)  # NCHW -> CNHW
+            y = y.view(self.conv_module.out_channels, -1)  # CNHW -> C,NHW
             # mean = y.mean(1)
             # var = y.var(1)
             mean = y.mean(1).detach()

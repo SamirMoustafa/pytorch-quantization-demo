@@ -52,7 +52,7 @@ if __name__ == "__main__":
     epochs = 5
     lr = 0.001
     momentum = 0.5
-    using_bn = False
+    using_bn = True
     load_quant_model_file = None
 
     torch.manual_seed(seed)
